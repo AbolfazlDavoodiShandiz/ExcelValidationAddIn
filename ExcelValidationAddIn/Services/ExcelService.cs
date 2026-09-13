@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -32,6 +32,8 @@ namespace ExcelValidationAddIn.Services
             System.Drawing.ColorTranslator.FromHtml("#FFC7CE"));
         private static readonly int WarningFillOle = System.Drawing.ColorTranslator.ToOle(
             System.Drawing.ColorTranslator.FromHtml("#FFEB9C"));
+        private static readonly int ErrorCellFillOle = System.Drawing.ColorTranslator.ToOle(
+            System.Drawing.ColorTranslator.FromHtml("#C0C0FF"));
 
         public static SheetSnapshot ReadActiveSheet(Excel.Application app)
         {
@@ -113,9 +115,14 @@ namespace ExcelValidationAddIn.Services
             return snapshot;
         }
 
-        public static void RenderValidationResults(Excel.Application app, string worksheetName, int columnCount, List<ValidationError> errors)
+        public static void RenderValidationResults(
+            Excel.Application app,
+            string worksheetName,
+            int columnCount,
+            List<ValidationError> errors)
         {
             Excel.Worksheet sheet = FindWorksheet(app, worksheetName);
+
             if (sheet == null)
             {
                 return;
@@ -123,21 +130,27 @@ namespace ExcelValidationAddIn.Services
 
             try
             {
+                // پاک کردن هایلایت‌های قبلی
                 foreach (string address in PreviousMarkedRanges)
                 {
                     Excel.Range range = sheet.Range[address];
+
                     try
                     {
-                        range.Interior.ColorIndex = Excel.XlColorIndex.xlColorIndexNone;
+                        range.Interior.ColorIndex =
+                            Excel.XlColorIndex.xlColorIndexNone;
                     }
                     finally
                     {
                         Marshal.ReleaseComObject(range);
                     }
                 }
+
+                // پاک کردن Commentهای قبلی
                 foreach (string address in PreviousCommentCells)
                 {
                     Excel.Range cell = sheet.Range[address];
+
                     try
                     {
                         cell.ClearComments();
@@ -147,40 +160,89 @@ namespace ExcelValidationAddIn.Services
                         Marshal.ReleaseComObject(cell);
                     }
                 }
+
                 PreviousMarkedRanges.Clear();
                 PreviousCommentCells.Clear();
 
                 var byRow = errors.GroupBy(e => e.SheetRowIndex);
+
                 foreach (var group in byRow)
                 {
                     int rowIndex = group.Key;
-                    bool warningOnly = group.All(e => e.Severity == ValidationSeverity.Warning);
+
+                    bool warningOnly =
+                        group.All(e => e.Severity == ValidationSeverity.Warning);
+
+                    // ---------------------------------------------------------
+                    // هایلایت کل سطر
+                    // ---------------------------------------------------------
 
                     Excel.Range rowRange = sheet.Range[
                         sheet.Cells[rowIndex, 1],
-                        sheet.Cells[rowIndex, Math.Max(columnCount, 1)]];
+                        sheet.Cells[
+                            rowIndex,
+                            Math.Max(columnCount, 1)]];
+
                     try
                     {
-                        rowRange.Interior.Color = warningOnly ? WarningFillOle : ErrorFillOle;
-                        PreviousMarkedRanges.Add((string)rowRange.get_Address(false, false));
+                        rowRange.Interior.Color =
+                            warningOnly
+                                ? WarningFillOle
+                                : ErrorFillOle;
+
+                        PreviousMarkedRanges.Add(
+                            (string)rowRange.get_Address(false, false));
                     }
                     finally
                     {
                         Marshal.ReleaseComObject(rowRange);
                     }
 
-                    Excel.Range commentCell = (Excel.Range)sheet.Cells[rowIndex, 1];
-                    try
+                    // ---------------------------------------------------------
+                    // مشخص کردن سلول‌های مشکل‌دار + Comment
+                    // ---------------------------------------------------------
+
+                    foreach (ValidationError error in group)
                     {
-                        string text = string.Join("\n", group.Select(e =>
-                            (string.IsNullOrEmpty(e.Column) ? "" : e.Column + ": ") + e.Message));
-                        commentCell.ClearComments();
-                        commentCell.AddComment(text);
-                        PreviousCommentCells.Add((string)commentCell.get_Address(false, false));
-                    }
-                    finally
-                    {
-                        Marshal.ReleaseComObject(commentCell);
+                        if (string.IsNullOrWhiteSpace(error.Column))
+                        {
+                            continue;
+                        }
+
+                        int columnIndex = FindColumnIndex(
+                            sheet,
+                            error.Column,
+                            columnCount);
+
+                        if (columnIndex <= 0)
+                        {
+                            continue;
+                        }
+
+                        Excel.Range errorCell =
+                            (Excel.Range)sheet.Cells[
+                                rowIndex,
+                                columnIndex];
+
+                        try
+                        {
+                            // هایلایت سلول خطادار
+                            errorCell.Interior.Color = ErrorCellFillOle;
+
+                            PreviousMarkedRanges.Add(
+                                (string)errorCell.get_Address(false, false));
+
+                            // Comment روی خود سلول خطادار
+                            errorCell.ClearComments();
+                            errorCell.AddComment(error.Message);
+
+                            PreviousCommentCells.Add(
+                                (string)errorCell.get_Address(false, false));
+                        }
+                        finally
+                        {
+                            Marshal.ReleaseComObject(errorCell);
+                        }
                     }
                 }
             }
@@ -188,6 +250,40 @@ namespace ExcelValidationAddIn.Services
             {
                 Marshal.ReleaseComObject(sheet);
             }
+        }
+
+        private static int FindColumnIndex(
+            Excel.Worksheet sheet,
+            string columnName,
+            int columnCount)
+        {
+            for (int columnIndex = 1;
+                 columnIndex <= Math.Max(columnCount, 1);
+                 columnIndex++)
+            {
+                Excel.Range headerCell =
+                    (Excel.Range)sheet.Cells[1, columnIndex];
+
+                try
+                {
+                    string headerValue =
+                        Convert.ToString(headerCell.Value2)?.Trim();
+
+                    if (string.Equals(
+                            headerValue,
+                            columnName.Trim(),
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return columnIndex;
+                    }
+                }
+                finally
+                {
+                    Marshal.ReleaseComObject(headerCell);
+                }
+            }
+
+            return -1;
         }
 
         /// <summary>Selects and scrolls to the given worksheet row so the user can jump to an error from the task pane.</summary>
